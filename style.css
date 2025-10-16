@@ -1,0 +1,33 @@
+body {
+    font-family: sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background-color: #f0f0f0;
+}
+
+.container {
+    position: relative;
+    width: 90vw;
+    max-width: 640px;
+    margin-top: 20px;
+}
+
+#webcam, #canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: auto;
+    border-radius: 10px;
+}
+
+.controls {
+    margin-top: calc(90vw * 0.5625 + 40px); /* Adjust margin based on video aspect ratio */
+    text-align: center;
+    padding: 20px;
+}
+
+#prompts-container div {
+    margin-bottom: 10px;
+}
