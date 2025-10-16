@@ -1,49 +1,44 @@
 body {
     font-family: sans-serif;
-    /* No need for flexbox here, a normal block layout is better for scrolling */
     margin: 0;
-    padding: 10px;
+    padding: 15px;
     background-color: #f0f0f0;
-    text-align: center; /* Center the h1 and other text */
+    text-align: center;
 }
 
-.container {
-    position: relative; /* Crucial for positioning the canvas inside */
-    width: 95%; /* Use a percentage for responsiveness */
-    max-width: 640px;
-    margin: 20px auto; /* Center the container horizontally */
-
-    /* --- THE KEY FIX IS HERE --- */
-    /* This "padding-bottom hack" creates a responsive box with a 16:9 aspect ratio */
-    /* (9 / 16 = 0.5625, or 56.25%) */
-    /* This gives the container height and pushes content below it. */
-    height: 0;
-    padding-bottom: 56.25%; 
-    background-color: #000; /* Add a background while video loads */
-    border-radius: 10px;
-    overflow: hidden; /* Keeps the video corners rounded */
-}
-
-#webcam, #canvas {
-    /* These remain absolute to stack on top of each other INSIDE the container */
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%; /* Make them fill the container perfectly */
-    /* No border-radius needed here, the parent .container handles it */
-}
-
+/* Style the controls section at the top */
 .controls {
-    /* --- REMOVED THE CALC() MARGIN --- */
-    /* This section now sits naturally below the container */
-    padding: 20px;
+    padding: 15px;
     background-color: #ffffff;
     border-radius: 10px;
     width: 95%;
     max-width: 640px;
-    margin: 20px auto; /* Center the controls box */
+    margin: 0 auto 20px auto; /* Center it and add 20px of space below */
     box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+
+/* Style the camera container below the controls */
+.container {
+    position: relative;
+    width: 95%;
+    max-width: 640px;
+    margin: 0 auto; /* Center the container horizontally */
+    
+    /* This creates a responsive box with a 16:9 aspect ratio */
+    height: 0;
+    padding-bottom: 56.25%; 
+    background-color: #000;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+#webcam, #canvas {
+    /* Stack the video and canvas inside the container */
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
 }
 
 #prompts-container div {
@@ -59,6 +54,7 @@ input[type="text"], button {
     border-radius: 5px;
     border: 1px solid #ccc;
     width: 80%;
+    box-sizing: border-box; /* Ensures padding doesn't affect width */
 }
 
 button {
@@ -66,4 +62,5 @@ button {
     color: white;
     cursor: pointer;
     border: none;
+    font-weight: bold;
 }
