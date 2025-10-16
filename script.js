@@ -55,7 +55,7 @@ async function loadModel() {
     console.log("Loading model...");
     try {
         // Create an inference session with the WebGL backend for GPU acceleration
-        session = await ort.InferenceSession.create('./model.onnx', {
+        session = await ort.InferenceSession.create('./yoloe-11s-seg.onnx', {
             executionProviders: ['webgl'],
         });
         console.log("Model loaded successfully!");
