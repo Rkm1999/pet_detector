@@ -8,10 +8,7 @@
 </head>
 <body>
     <h1>AI Pet Detector 🐾</h1>
-    <div class="container">
-        <video id="webcam" autoplay playsinline></video>
-        <canvas id="canvas"></canvas>
-    </div>
+
     
     <div class="controls">
         <h3>Add Visual Prompts</h3>
@@ -19,6 +16,11 @@
         <div id="prompts-container">
             </div>
         <button id="add-prompt-btn">Add Another Pet</button>
+    </div>
+    
+    <div class="container">
+        <video id="webcam" autoplay playsinline></video>
+        <canvas id="canvas"></canvas>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
