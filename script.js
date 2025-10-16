@@ -10,23 +10,9 @@ const modelWidth = 640;
 const modelHeight = 640;
 const confidenceThreshold = 0.50; // Filter out detections below this confidence
 
-// --- COCO Class Names ---
-// This model was likely trained on the COCO dataset, which has these 80 classes.
-const classNames = [
-    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
-    'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
-    'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
-    'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
-    'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
-    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
-    'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
-    'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
-    'hair drier', 'toothbrush'
-];
-
 // --- Global State ---
 let session;
-let prompts = []; // Will store { id, name, file } for each prompt
+let prompts = []; // Will store { id, name, file, tensor } for each prompt
 let promptCount = 0;
 let tempCanvas = document.createElement('canvas'); // For preprocessing frames
 tempCanvas.width = modelWidth;
@@ -70,14 +56,25 @@ function handlePromptCreation() {
     `;
     promptsContainer.appendChild(promptDiv);
 
-    prompts.push({ id: id, name: `Pet #${promptCount}`, file: null });
+    const newPrompt = { id: id, name: `Pet #${promptCount}`, file: null, tensor: null };
+    prompts.push(newPrompt);
 
     document.getElementById(`name-${id}`).addEventListener('input', (e) => {
         prompts[id].name = e.target.value || `Pet #${promptCount}`;
     });
 
-    document.getElementById(`file-${id}`).addEventListener('change', (e) => {
-        prompts[id].file = e.target.files[0];
+    // When a user uploads a file, process it into a tensor immediately.
+    document.getElementById(`file-${id}`).addEventListener('change', async (e) => {
+        if (e.target.files[0]) {
+            prompts[id].file = e.target.files[0];
+            const image = new Image();
+            image.src = URL.createObjectURL(prompts[id].file);
+            await image.decode();
+            // NOTE: This assumes the prompt image is processed the same way as the main image.
+            // A true promptable model might require a different kind of preprocessing for prompts.
+            prompts[id].tensor = preprocessImage(image);
+            console.log(`Prompt for ${prompts[id].name} has been processed.`);
+        }
     });
 }
 
@@ -87,13 +84,14 @@ function handlePromptCreation() {
 async function loadModel() {
     console.log("Loading model...");
     try {
-        session = await ort.InferenceSession.create('./yoloe-11s-seg.onnx', {
+        // IMPORTANT: Replace './yoloe-11s-seg.onnx' with the filename of your NEW, promptable model.
+        session = await ort.InferenceSession.create('./yoloe-11s-seg-promptable.onnx', {
             executionProviders: ['webgl', 'wasm'],
         });
         console.log("Model loaded successfully using:", session.executionProvider);
     } catch (error) {
         console.error("Failed to load the model:", error);
-        alert("Error: Could not load the AI model. Check the console for details.");
+        alert("Error: Could not load the AI model. Make sure you have the correct, two-input .onnx file.");
     }
 }
 
@@ -107,14 +105,31 @@ async function runDetection() {
     }
 
     const modelInput = preprocessFrame(video);
-    
-    // UPDATED: The model only takes one input: 'images'.
-    // We no longer send the visual prompts.
-    const feeds = { images: modelInput };
+    const promptTensors = prompts.filter(p => p.tensor).map(p => p.tensor.data);
+
+    if (promptTensors.length === 0) {
+        // If there are no prompts, we can't run a promptable model.
+        // We could add logic here to run in a "prompt-free" mode if the model supports it.
+        ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear the canvas
+        requestAnimationFrame(runDetection);
+        return;
+    }
+
+    // Combine all individual prompt tensors into a single "batch" tensor.
+    const combinedPromptData = new Float32Array(promptTensors.map(d => [...d]).flat());
+    const promptInputs = new ort.Tensor('float32', combinedPromptData, [promptTensors.length, 3, modelWidth, modelHeight]);
+
+    // !! CRITICAL !!
+    // The input names 'images' and 'prompt_embeddings' are educated guesses.
+    // You MUST verify these names using Netron with your NEW promptable .onnx model.
+    const feeds = {
+        images: modelInput,
+        prompt_embeddings: promptInputs 
+    };
 
     try {
         const results = await session.run(feeds);
-        // The detection data is in 'output0' as confirmed by Netron.
+        // Also verify the output name(s) with Netron. 'output0' is a common default.
         const detections = postprocessResults(results.output0);
         drawDetections(detections);
     } catch (error) {
@@ -127,7 +142,7 @@ async function runDetection() {
 /**
  * Preprocesses a single image (from video or file) into a tensor.
  */
-function preprocessFrame(imageSource) {
+function preprocessImage(imageSource) {
     tempCtx.drawImage(imageSource, 0, 0, modelWidth, modelHeight);
     const imageData = tempCtx.getImageData(0, 0, modelWidth, modelHeight);
     const { data } = imageData;
@@ -142,20 +157,20 @@ function preprocessFrame(imageSource) {
     return new ort.Tensor('float32', new Float32Array(transposedData), [1, 3, modelWidth, modelHeight]);
 }
 
+function preprocessFrame(imageSource) {
+    return preprocessImage(imageSource);
+}
+
 
 /**
  * Decodes the raw model output into a clean list of detections.
- * @param {ort.Tensor} outputTensor - The output from the model.
- * @returns {Array} - A list of detected objects.
  */
 function postprocessResults(outputTensor) {
-    // The output shape is [1, 116, 8400]. We need to transpose it to [1, 8400, 116]
-    // to easily iterate through all 8400 potential detections.
     const originalData = outputTensor.data;
-    const outputShape = outputTensor.dims; // [1, 116, 8400]
-    const numDetections = outputShape[2]; // 8400
-    const detectionSize = outputShape[1]; // 116
-    const numClasses = classNames.length; // 80
+    const outputShape = outputTensor.dims; 
+    const numDetections = outputShape[2]; // e.g., 8400
+    const detectionSize = outputShape[1]; // e.g., 116
+    const numClasses = prompts.length; // The number of classes is now the number of prompts we provided
 
     const transposedData = [];
     for (let i = 0; i < numDetections; i++) {
@@ -169,7 +184,8 @@ function postprocessResults(outputTensor) {
     const boxes = [];
     for (let i = 0; i < numDetections; i++) {
         const detection = transposedData[i];
-        const classScores = detection.slice(4, 4 + numClasses); // Scores for 80 classes
+        // For a promptable model, the class scores directly correspond to our prompts.
+        const classScores = detection.slice(4, 4 + numClasses); 
         
         let bestClassIndex = -1;
         let maxScore = 0;
@@ -189,7 +205,7 @@ function postprocessResults(outputTensor) {
                     width * (canvas.width / modelWidth),
                     height * (canvas.height / modelHeight)
                 ],
-                label: classNames[bestClassIndex],
+                label: prompts[bestClassIndex]?.name || `Object ${bestClassIndex}`,
                 score: maxScore
             });
         }
@@ -234,7 +250,7 @@ function nonMaxSuppression(boxes, iouThreshold) {
         selectedBoxes.push(currentBox);
         
         for (let i = sortedBoxes.length - 1; i >= 0; i--) {
-            if (sortedBoxes[i].label !== currentBox.label) continue; // Only compare boxes of the same class
+            if (sortedBoxes[i].label !== currentBox.label) continue;
             const iou = intersectionOverUnion(currentBox, sortedBoxes[i]);
             if (iou > iouThreshold) {
                 sortedBoxes.splice(i, 1);
@@ -269,7 +285,6 @@ function intersectionOverUnion(box1, box2) {
  * The main function that starts the application.
  */
 async function main() {
-    // This UI is now disconnected from the model but we can leave it.
     addPromptBtn.addEventListener('click', handlePromptCreation);
     handlePromptCreation();
 
