@@ -5,29 +5,36 @@ const ctx = canvas.getContext('2d');
 const addPromptBtn = document.getElementById('add-prompt-btn');
 const promptsContainer = document.getElementById('prompts-container');
 
-// Global variable to hold the AI model session
+// --- Configuration ---
+const modelWidth = 640;
+const modelHeight = 640;
+const confidenceThreshold = 0.50; // Filter out detections below this confidence
+
+// --- Global State ---
 let session;
+let prompts = []; // Will store { id, name, file } for each prompt
 let promptCount = 0;
+let tempCanvas = document.createElement('canvas'); // For preprocessing frames
+tempCanvas.width = modelWidth;
+tempCanvas.height = modelHeight;
+let tempCtx = tempCanvas.getContext('2d');
 
 /**
  * Sets up the smartphone camera and gets the video stream.
  */
 async function setupCamera() {
-    // Request access to the user's media devices
     const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: { 
-            facingMode: 'environment', // Use the rear camera
-            width: { ideal: 1280 }, // Request a higher resolution if available
+            facingMode: 'environment',
+            width: { ideal: 1280 },
             height: { ideal: 720 }
         }
     });
     video.srcObject = stream;
 
-    // Return a promise that resolves once the video metadata is loaded
     return new Promise((resolve) => {
         video.onloadedmetadata = () => {
-            // Match canvas dimensions to the actual video dimensions
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             resolve(video);
@@ -36,16 +43,28 @@ async function setupCamera() {
 }
 
 /**
- * Handles the "Add Another Pet" button clicks to dynamically create UI.
+ * Handles adding new UI elements for prompts and storing their info.
  */
 function handlePromptCreation() {
     promptCount++;
+    const id = promptCount - 1;
+
     const promptDiv = document.createElement('div');
     promptDiv.innerHTML = `
-        <input type="text" placeholder="Pet Name #${promptCount}" id="name-${promptCount}">
-        <input type="file" accept="image/*" id="file-${promptCount}">
+        <input type="text" placeholder="Pet Name #${promptCount}" id="name-${id}">
+        <input type="file" accept="image/*" id="file-${id}">
     `;
     promptsContainer.appendChild(promptDiv);
+
+    prompts.push({ id: id, name: `Pet #${promptCount}`, file: null });
+
+    document.getElementById(`name-${id}`).addEventListener('input', (e) => {
+        prompts[id].name = e.target.value || `Pet #${promptCount}`;
+    });
+
+    document.getElementById(`file-${id}`).addEventListener('change', (e) => {
+        prompts[id].file = e.target.files[0];
+    });
 }
 
 /**
@@ -54,11 +73,10 @@ function handlePromptCreation() {
 async function loadModel() {
     console.log("Loading model...");
     try {
-        // Create an inference session with the WebGL backend for GPU acceleration
         session = await ort.InferenceSession.create('./yoloe-11s-seg.onnx', {
-            executionProviders: ['webgl', 'wasm'], // <-- UPDATED LINE
+            executionProviders: ['webgl', 'wasm'],
         });
-        console.log("Model loaded successfully!");
+        console.log("Model loaded successfully using:", session.executionProvider);
     } catch (error) {
         console.error("Failed to load the model:", error);
         alert("Error: Could not load the AI model. Check the console for details.");
@@ -70,113 +88,180 @@ async function loadModel() {
  */
 async function runDetection() {
     if (!session) {
-        // Don't run if the model isn't loaded yet
         requestAnimationFrame(runDetection);
         return;
     }
 
-    // 1. Pre-process the current video frame for the model
-    // This is a placeholder! You MUST implement this based on your model's needs.
     const modelInput = preprocessFrame(video);
-
-    // 2. Pre-process any visual prompts the user has uploaded
-    // This is also a placeholder for your custom logic.
     const promptInputs = await preprocessPrompts();
-
-    // 3. Create the input feed object for the model
-    // The keys ('images', 'prompts') must exactly match the input names of your ONNX model.
+    
+    // IMPORTANT: The input names ('images', 'prompts') must exactly match your model.
+    // Use a tool like Netron to inspect your .onnx file to find the correct names.
     const feeds = {
         images: modelInput,
-        prompts: promptInputs 
+        visual_prompts: promptInputs // This is a common name, but might be different
     };
 
-    // 4. Run inference
-    const results = await session.run(feeds);
+    try {
+        const results = await session.run(feeds);
+        // IMPORTANT: The output name 'output0' is a placeholder. Inspect your model!
+        const detections = postprocessResults(results.output0);
+        drawDetections(detections);
+    } catch (error) {
+        console.error("Error during model inference:", error);
+    }
 
-    // 5. Post-process the model's output to get readable data
-    // This is the final placeholder for you to implement.
-    const detections = postprocessResults(results);
-
-    // 6. Draw the results on the canvas
-    drawDetections(detections);
-
-    // 7. Request the next frame to continue the loop
     requestAnimationFrame(runDetection);
 }
 
 /**
- * Draws the bounding boxes and labels onto the canvas.
- * @param {Array} detections - An array of detection objects.
+ * Preprocesses a single image (from video or file) into a tensor.
+ * @param {HTMLVideoElement | HTMLImageElement} imageSource - The image to process.
+ * @returns {ort.Tensor} - The processed tensor for the model.
  */
-function drawDetections(detections) {
-    // Clear the previous frame's drawings
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+function preprocessImage(imageSource) {
+    // 1. Draw the image to a temporary canvas to resize it
+    tempCtx.drawImage(imageSource, 0, 0, modelWidth, modelHeight);
 
-    detections.forEach(det => {
-        const [x, y, width, height] = det.box;
-        const label = `${det.label}: ${Math.round(det.score * 100)}%`;
-        
-        // Draw the bounding box
-        ctx.strokeStyle = '#00FF00'; // Green color for the box
-        ctx.lineWidth = 4;
-        ctx.strokeRect(x, y, width, height);
-        
-        // Draw the label background
-        ctx.fillStyle = '#00FF00';
-        const textWidth = ctx.measureText(label).width;
-        ctx.fillRect(x, y - 20, textWidth + 10, 20);
-        
-        // Draw the label text
-        ctx.fillStyle = '#000000'; // Black text
-        ctx.font = '16px sans-serif';
-        ctx.fillText(label, x + 5, y - 5);
-    });
+    // 2. Get the pixel data
+    const imageData = tempCtx.getImageData(0, 0, modelWidth, modelHeight);
+    const { data } = imageData;
+
+    // 3. Normalize and transpose the data from [H, W, C] to [C, H, W]
+    const red = [], green = [], blue = [];
+    for (let i = 0; i < data.length; i += 4) {
+        red.push(data[i] / 255);
+        green.push(data[i + 1] / 255);
+        blue.push(data[i + 2] / 255);
+    }
+    const transposedData = [...red, ...green, ...blue];
+
+    // 4. Create a tensor
+    return new ort.Tensor('float32', new Float32Array(transposedData), [1, 3, modelWidth, modelHeight]);
 }
 
-// --- Placeholder Functions You Must Implement ---
-
+/**
+ * Preprocesses the current video frame.
+ */
 function preprocessFrame(videoElement) {
-    // TODO: Implement this!
-    // This function needs to take the video frame, resize it to your model's expected
-    // input size (e.g., 640x640), convert it to a Float32Array, normalize the pixel
-    // values (e.g., divide by 255), and arrange it into the correct tensor shape 
-    // (e.g., [1, 3, 640, 640] for Batch, Channels, Height, Width).
-    // You will need to draw the video to a temporary canvas to get pixel data.
-    
-    // Placeholder returns an empty tensor.
-    const placeholderTensor = new ort.Tensor('float32', new Float32Array(1 * 3 * 640 * 640), [1, 3, 640, 640]);
-    return placeholderTensor;
+    return preprocessImage(videoElement);
 }
 
+/**
+ * Preprocesses all uploaded prompt images.
+ */
 async function preprocessPrompts() {
-    // TODO: Implement this!
-    // This function needs to loop through the file inputs, read the uploaded images,
-    // and process them just like the video frame (resize, normalize, etc.).
-    // You will likely need to combine them into a single tensor for the model.
-    
-    // Placeholder returns an empty tensor.
-    const placeholderTensor = new ort.Tensor('float32', new Float32Array(0));
-    return placeholderTensor;
+    const promptTensors = [];
+    for (const prompt of prompts) {
+        if (prompt.file) {
+            const image = new Image();
+            image.src = URL.createObjectURL(prompt.file);
+            await image.decode(); // Wait for image to load
+            const tensor = preprocessImage(image);
+            promptTensors.push(tensor.data);
+        }
+    }
+
+    if (promptTensors.length === 0) {
+        // Return a tensor with a shape the model expects for no prompts, e.g., [0, 3, W, H]
+        return new ort.Tensor('float32', [], [0, 3, modelWidth, modelHeight]);
+    }
+
+    // Concatenate all prompt tensors into a single batch
+    const combinedData = new Float32Array(promptTensors.map(d => [...d]).flat());
+    return new ort.Tensor('float32', combinedData, [promptTensors.length, 3, modelWidth, modelHeight]);
 }
 
-function postprocessResults(results) {
-    // TODO: Implement this!
-    // This function needs to parse the output tensors from the model.
-    // The raw output is usually a large array of numbers. You'll need to decode this
-    // to find the coordinates of bounding boxes, the confidence scores, and the
-    // class labels for each detected object. You might also need to apply
-    // Non-Max Suppression (NMS) to filter out duplicate boxes.
+/**
+ * Decodes the raw model output into a clean list of detections.
+ * @param {ort.Tensor} outputTensor - The output from the model.
+ * @returns {Array} - A list of detected objects.
+ */
+function postprocessResults(outputTensor) {
+    const data = outputTensor.data;
+    const boxes = [];
     
-    // Placeholder returns an empty array.
-    return []; 
+    // The output shape and format is highly model-specific.
+    // This is a common format for YOLO-style models: [batch, num_detections, 4_coords + 1_confidence + num_classes]
+    const outputDimensions = outputTensor.dims;
+    const numDetections = outputDimensions[1];
+    const detectionSize = outputDimensions[2];
+
+    for (let i = 0; i < numDetections; i++) {
+        const detection = data.slice(i * detectionSize, (i + 1) * detectionSize);
+        const confidence = detection[4];
+
+        if (confidence > confidenceThreshold) {
+            const [x_center, y_center, width, height] = detection.slice(0, 4);
+            const classScores = detection.slice(5);
+            
+            let bestClassIndex = -1;
+            let maxScore = 0;
+            classScores.forEach((score, index) => {
+                if (score > maxScore) {
+                    maxScore = score;
+                    bestClassIndex = index;
+                }
+            });
+
+            if (bestClassIndex !== -1) {
+                boxes.push({
+                    box: [
+                        (x_center - width / 2) * (canvas.width / modelWidth),
+                        (y_center - height / 2) * (canvas.height / modelHeight),
+                        width * (canvas.width / modelWidth),
+                        height * (canvas.height / modelHeight)
+                    ],
+                    label: prompts[bestClassIndex]?.name || `Object ${bestClassIndex}`,
+                    score: confidence
+                });
+            }
+        }
+    }
+
+    return nonMaxSuppression(boxes, 0.5); // Apply NMS with an IoU threshold of 0.5
+}
+
+/**
+ * Performs Non-Maximum Suppression to filter out overlapping boxes.
+ */
+function nonMaxSuppression(boxes, iouThreshold) {
+    const sortedBoxes = boxes.sort((a, b) => b.score - a.score);
+    const selectedBoxes = [];
     
-    // Example of what the final output should look like:
-    /*
-    return [
-        { box: [x1, y1, width, height], label: 'Fluffy', score: 0.95 },
-        { box: [x2, y2, width, height], label: 'Whiskers', score: 0.89 }
-    ];
-    */
+    while (sortedBoxes.length > 0) {
+        const currentBox = sortedBoxes.shift();
+        selectedBoxes.push(currentBox);
+        
+        for (let i = sortedBoxes.length - 1; i >= 0; i--) {
+            const iou = intersectionOverUnion(currentBox, sortedBoxes[i]);
+            if (iou > iouThreshold) {
+                sortedBoxes.splice(i, 1);
+            }
+        }
+    }
+    
+    return selectedBoxes;
+}
+
+/**
+ * Calculates the Intersection over Union (IoU) of two boxes.
+ */
+function intersectionOverUnion(box1, box2) {
+    const [x1, y1, w1, h1] = box1.box;
+    const [x2, y2, w2, h2] = box2.box;
+
+    const interX1 = Math.max(x1, x2);
+    const interY1 = Math.max(y1, y2);
+    const interX2 = Math.min(x1 + w1, x2 + w2);
+    const interY2 = Math.min(y1 + h1, y2 + h2);
+
+    const interArea = Math.max(0, interX2 - interX1) * Math.max(0, interY2 - interY1);
+    const box1Area = w1 * h1;
+    const box2Area = w2 * h2;
+    
+    const unionArea = box1Area + box2Area - interArea;
+    return interArea / unionArea;
 }
 
 /**
