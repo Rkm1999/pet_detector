@@ -10,6 +10,20 @@ const modelWidth = 640;
 const modelHeight = 640;
 const confidenceThreshold = 0.50; // Filter out detections below this confidence
 
+// --- COCO Class Names ---
+// This model was likely trained on the COCO dataset, which has these 80 classes.
+const classNames = [
+    'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat', 'traffic light',
+    'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow',
+    'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase', 'frisbee',
+    'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard', 'surfboard',
+    'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+    'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch',
+    'potted plant', 'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone',
+    'microwave', 'oven', 'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear',
+    'hair drier', 'toothbrush'
+];
+
 // --- Global State ---
 let session;
 let prompts = []; // Will store { id, name, file } for each prompt
@@ -87,24 +101,20 @@ async function loadModel() {
  * Main detection loop that runs for every frame of the video.
  */
 async function runDetection() {
-    if (!session) {
+    if (!session || !video.srcObject) {
         requestAnimationFrame(runDetection);
         return;
     }
 
     const modelInput = preprocessFrame(video);
-    const promptInputs = await preprocessPrompts();
     
-    // IMPORTANT: The input names ('images', 'prompts') must exactly match your model.
-    // Use a tool like Netron to inspect your .onnx file to find the correct names.
-    const feeds = {
-        images: modelInput,
-        visual_prompts: promptInputs // This is a common name, but might be different
-    };
+    // UPDATED: The model only takes one input: 'images'.
+    // We no longer send the visual prompts.
+    const feeds = { images: modelInput };
 
     try {
         const results = await session.run(feeds);
-        // IMPORTANT: The output name 'output0' is a placeholder. Inspect your model!
+        // The detection data is in 'output0' as confirmed by Netron.
         const detections = postprocessResults(results.output0);
         drawDetections(detections);
     } catch (error) {
@@ -116,18 +126,12 @@ async function runDetection() {
 
 /**
  * Preprocesses a single image (from video or file) into a tensor.
- * @param {HTMLVideoElement | HTMLImageElement} imageSource - The image to process.
- * @returns {ort.Tensor} - The processed tensor for the model.
  */
-function preprocessImage(imageSource) {
-    // 1. Draw the image to a temporary canvas to resize it
+function preprocessFrame(imageSource) {
     tempCtx.drawImage(imageSource, 0, 0, modelWidth, modelHeight);
-
-    // 2. Get the pixel data
     const imageData = tempCtx.getImageData(0, 0, modelWidth, modelHeight);
     const { data } = imageData;
 
-    // 3. Normalize and transpose the data from [H, W, C] to [C, H, W]
     const red = [], green = [], blue = [];
     for (let i = 0; i < data.length; i += 4) {
         red.push(data[i] / 255);
@@ -135,42 +139,9 @@ function preprocessImage(imageSource) {
         blue.push(data[i + 2] / 255);
     }
     const transposedData = [...red, ...green, ...blue];
-
-    // 4. Create a tensor
     return new ort.Tensor('float32', new Float32Array(transposedData), [1, 3, modelWidth, modelHeight]);
 }
 
-/**
- * Preprocesses the current video frame.
- */
-function preprocessFrame(videoElement) {
-    return preprocessImage(videoElement);
-}
-
-/**
- * Preprocesses all uploaded prompt images.
- */
-async function preprocessPrompts() {
-    const promptTensors = [];
-    for (const prompt of prompts) {
-        if (prompt.file) {
-            const image = new Image();
-            image.src = URL.createObjectURL(prompt.file);
-            await image.decode(); // Wait for image to load
-            const tensor = preprocessImage(image);
-            promptTensors.push(tensor.data);
-        }
-    }
-
-    if (promptTensors.length === 0) {
-        // Return a tensor with a shape the model expects for no prompts, e.g., [0, 3, W, H]
-        return new ort.Tensor('float32', [], [0, 3, modelWidth, modelHeight]);
-    }
-
-    // Concatenate all prompt tensors into a single batch
-    const combinedData = new Float32Array(promptTensors.map(d => [...d]).flat());
-    return new ort.Tensor('float32', combinedData, [promptTensors.length, 3, modelWidth, modelHeight]);
-}
 
 /**
  * Decodes the raw model output into a clean list of detections.
@@ -178,49 +149,78 @@ async function preprocessPrompts() {
  * @returns {Array} - A list of detected objects.
  */
 function postprocessResults(outputTensor) {
-    const data = outputTensor.data;
-    const boxes = [];
-    
-    // The output shape and format is highly model-specific.
-    // This is a common format for YOLO-style models: [batch, num_detections, 4_coords + 1_confidence + num_classes]
-    const outputDimensions = outputTensor.dims;
-    const numDetections = outputDimensions[1];
-    const detectionSize = outputDimensions[2];
+    // The output shape is [1, 116, 8400]. We need to transpose it to [1, 8400, 116]
+    // to easily iterate through all 8400 potential detections.
+    const originalData = outputTensor.data;
+    const outputShape = outputTensor.dims; // [1, 116, 8400]
+    const numDetections = outputShape[2]; // 8400
+    const detectionSize = outputShape[1]; // 116
+    const numClasses = classNames.length; // 80
 
+    const transposedData = [];
     for (let i = 0; i < numDetections; i++) {
-        const detection = data.slice(i * detectionSize, (i + 1) * detectionSize);
-        const confidence = detection[4];
-
-        if (confidence > confidenceThreshold) {
-            const [x_center, y_center, width, height] = detection.slice(0, 4);
-            const classScores = detection.slice(5);
-            
-            let bestClassIndex = -1;
-            let maxScore = 0;
-            classScores.forEach((score, index) => {
-                if (score > maxScore) {
-                    maxScore = score;
-                    bestClassIndex = index;
-                }
-            });
-
-            if (bestClassIndex !== -1) {
-                boxes.push({
-                    box: [
-                        (x_center - width / 2) * (canvas.width / modelWidth),
-                        (y_center - height / 2) * (canvas.height / modelHeight),
-                        width * (canvas.width / modelWidth),
-                        height * (canvas.height / modelHeight)
-                    ],
-                    label: prompts[bestClassIndex]?.name || `Object ${bestClassIndex}`,
-                    score: confidence
-                });
+        const detection = [];
+        for (let j = 0; j < detectionSize; j++) {
+            detection.push(originalData[j * numDetections + i]);
+        }
+        transposedData.push(detection);
+    }
+    
+    const boxes = [];
+    for (let i = 0; i < numDetections; i++) {
+        const detection = transposedData[i];
+        const classScores = detection.slice(4, 4 + numClasses); // Scores for 80 classes
+        
+        let bestClassIndex = -1;
+        let maxScore = 0;
+        classScores.forEach((score, index) => {
+            if (score > maxScore) {
+                maxScore = score;
+                bestClassIndex = index;
             }
+        });
+
+        if (maxScore > confidenceThreshold) {
+            const [x_center, y_center, width, height] = detection.slice(0, 4);
+            boxes.push({
+                box: [
+                    (x_center - width / 2) * (canvas.width / modelWidth),
+                    (y_center - height / 2) * (canvas.height / modelHeight),
+                    width * (canvas.width / modelWidth),
+                    height * (canvas.height / modelHeight)
+                ],
+                label: classNames[bestClassIndex],
+                score: maxScore
+            });
         }
     }
 
-    return nonMaxSuppression(boxes, 0.5); // Apply NMS with an IoU threshold of 0.5
+    return nonMaxSuppression(boxes, 0.5);
 }
+
+/**
+ * Draws the bounding boxes and labels onto the canvas.
+ */
+function drawDetections(detections) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    detections.forEach(det => {
+        const [x, y, width, height] = det.box;
+        const label = `${det.label}: ${Math.round(det.score * 100)}%`;
+        
+        ctx.strokeStyle = '#00FF00';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(x, y, width, height);
+        
+        ctx.fillStyle = '#00FF00';
+        const textWidth = ctx.measureText(label).width;
+        ctx.fillRect(x, y > 20 ? y - 20 : y, textWidth + 10, 20);
+        
+        ctx.fillStyle = '#000000';
+        ctx.font = '16px sans-serif';
+        ctx.fillText(label, x + 5, y > 20 ? y - 5 : y + 15);
+    });
+}
+
 
 /**
  * Performs Non-Maximum Suppression to filter out overlapping boxes.
@@ -234,6 +234,7 @@ function nonMaxSuppression(boxes, iouThreshold) {
         selectedBoxes.push(currentBox);
         
         for (let i = sortedBoxes.length - 1; i >= 0; i--) {
+            if (sortedBoxes[i].label !== currentBox.label) continue; // Only compare boxes of the same class
             const iou = intersectionOverUnion(currentBox, sortedBoxes[i]);
             if (iou > iouThreshold) {
                 sortedBoxes.splice(i, 1);
@@ -268,8 +269,9 @@ function intersectionOverUnion(box1, box2) {
  * The main function that starts the application.
  */
 async function main() {
+    // This UI is now disconnected from the model but we can leave it.
     addPromptBtn.addEventListener('click', handlePromptCreation);
-    handlePromptCreation(); // Add the first prompt input on page load
+    handlePromptCreation();
 
     await setupCamera();
     video.play();
@@ -279,3 +281,4 @@ async function main() {
 
 // Start the app!
 main();
+
