@@ -1,33 +1,69 @@
 body {
     font-family: sans-serif;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
+    /* No need for flexbox here, a normal block layout is better for scrolling */
+    margin: 0;
+    padding: 10px;
     background-color: #f0f0f0;
+    text-align: center; /* Center the h1 and other text */
 }
 
 .container {
-    position: relative;
-    width: 90vw;
+    position: relative; /* Crucial for positioning the canvas inside */
+    width: 95%; /* Use a percentage for responsiveness */
     max-width: 640px;
-    margin-top: 20px;
+    margin: 20px auto; /* Center the container horizontally */
+
+    /* --- THE KEY FIX IS HERE --- */
+    /* This "padding-bottom hack" creates a responsive box with a 16:9 aspect ratio */
+    /* (9 / 16 = 0.5625, or 56.25%) */
+    /* This gives the container height and pushes content below it. */
+    height: 0;
+    padding-bottom: 56.25%; 
+    background-color: #000; /* Add a background while video loads */
+    border-radius: 10px;
+    overflow: hidden; /* Keeps the video corners rounded */
 }
 
 #webcam, #canvas {
+    /* These remain absolute to stack on top of each other INSIDE the container */
     position: absolute;
     top: 0;
     left: 0;
     width: 100%;
-    height: auto;
-    border-radius: 10px;
+    height: 100%; /* Make them fill the container perfectly */
+    /* No border-radius needed here, the parent .container handles it */
 }
 
 .controls {
-    margin-top: calc(90vw * 0.5625 + 40px); /* Adjust margin based on video aspect ratio */
-    text-align: center;
+    /* --- REMOVED THE CALC() MARGIN --- */
+    /* This section now sits naturally below the container */
     padding: 20px;
+    background-color: #ffffff;
+    border-radius: 10px;
+    width: 95%;
+    max-width: 640px;
+    margin: 20px auto; /* Center the controls box */
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
 }
 
 #prompts-container div {
     margin-bottom: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+}
+
+input[type="text"], button {
+    padding: 10px;
+    border-radius: 5px;
+    border: 1px solid #ccc;
+    width: 80%;
+}
+
+button {
+    background-color: #007bff;
+    color: white;
+    cursor: pointer;
+    border: none;
 }
